@@ -17,3 +17,11 @@ update-tests-logs.zip
 run-logs.zip
 artifact-hdrs.txt
 nightly-hdrs.txt
+ci-jobs.json
+jobs-artifacts.json
+winrepo.json
+update-tests-logs/
+update-tests-logs2/
+*.zip
+artifact-hdrs.txt
+nightly-hdrs.txt
