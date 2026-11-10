@@ -126,34 +126,56 @@ jobs:
       - name: Test update_core
         shell: pwsh
         run: |
-          Set-Location build-windows
-          if (-not (Test-Path .\update_tests.exe)) { throw "update_tests.exe missing" }
-          Write-Host "QT_PREFIX=$env:QT_PREFIX"
-          Write-Host ("update_tests size={0}" -f (Get-Item .\update_tests.exe).Length)
-          Remove-Item .\update_tests.console.txt,.\update_tests.err.txt,.\update_tests.log -ErrorAction SilentlyContinue
-          # Start-Process avoids PowerShell comma-splitting and keeps stdout/stderr files even on crash.
-          $p = Start-Process -FilePath (Join-Path (Get-Location) "update_tests.exe") -ArgumentList @("-v2","-o","update_tests.log,txt") -WorkingDirectory (Get-Location) -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "update_tests.console.txt") -RedirectStandardError (Join-Path (Get-Location) "update_tests.err.txt")
-          $code = if ($null -eq $p) { -999 } else { $p.ExitCode }
-          if (-not (Test-Path .\update_tests.console.txt)) { Set-Content .\update_tests.console.txt "Start-Process produced no console capture" }
-          if (-not (Test-Path .\update_tests.err.txt)) { Set-Content .\update_tests.err.txt "Start-Process produced no stderr capture" }
-          Write-Host "===== update_tests console ====="; Get-Content .\update_tests.console.txt -ErrorAction SilentlyContinue
-          Write-Host "===== update_tests err ====="; Get-Content .\update_tests.err.txt -ErrorAction SilentlyContinue
-          Write-Host "===== update_tests log ====="; Get-Content .\update_tests.log -ErrorAction SilentlyContinue
+          $ErrorActionPreference = "Continue"
+          $dir = Join-Path $PWD "build-windows"
+          $diag = Join-Path $dir "update_tests.diag.txt"
+          $exe = Join-Path $dir "update_tests.exe"
+          "begin=$(Get-Date -Format o)" | Set-Content $diag
+          "pwd=$PWD" | Add-Content $diag
+          "exe_exists=$(Test-Path $exe)" | Add-Content $diag
+          if (-not (Test-Path $exe)) { throw "update_tests.exe missing" }
+          $item = Get-Item $exe
+          "exe_size=$($item.Length) exe_full=$($item.FullName)" | Add-Content $diag
+          Format-Hex -Path $exe -Count 16 | Out-String | Add-Content $diag
+          Remove-Item (Join-Path $dir "update_tests.console.txt"),(Join-Path $dir "update_tests.err.txt"),(Join-Path $dir "update_tests.log") -ErrorAction SilentlyContinue
+          $code = -999
+          try {
+            # Prefer cmd with relative path from build-windows (no PowerShell comma splitting).
+            Push-Location $dir
+            cmd.exe /c "update_tests.exe -v2 -o update_tests.log,txt > update_tests.console.txt 2> update_tests.err.txt"
+            $code = $LASTEXITCODE
+            Pop-Location
+            "cmd_exit=$code" | Add-Content $diag
+          } catch {
+            Pop-Location -ErrorAction SilentlyContinue
+            $_ | Out-String | Add-Content $diag
+            try {
+              $p = Start-Process -FilePath $exe -ArgumentList @("-v2","-o","update_tests.log,txt") -WorkingDirectory $dir -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $dir "update_tests.console.txt") -RedirectStandardError (Join-Path $dir "update_tests.err.txt")
+              $code = $p.ExitCode
+              "start_process_exit=$code" | Add-Content $diag
+            } catch {
+              $_ | Out-String | Add-Content $diag
+              throw
+            }
+          }
+          foreach ($name in @("update_tests.console.txt","update_tests.err.txt","update_tests.log","update_tests.diag.txt")) {
+            $path = Join-Path $dir $name
+            if (-not (Test-Path $path)) { Set-Content $path "missing after launch" }
+            Write-Host "===== $name ====="
+            Get-Content $path -ErrorAction SilentlyContinue
+          }
           Write-Host "update_tests exit_code=$code"
           $summary = @()
-          foreach ($f in @(".\update_tests.log",".\update_tests.console.txt",".\update_tests.err.txt")) {
-            if (Test-Path $f) { $summary += Get-Content $f }
+          foreach ($name in @("update_tests.log","update_tests.console.txt","update_tests.err.txt","update_tests.diag.txt")) {
+            $summary += Get-Content (Join-Path $dir $name) -ErrorAction SilentlyContinue
           }
-          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll' }
+          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll|cmd_exit|begin=' }
           if ($failLines) {
-            Write-Host "===== failure highlights ====="
-            $failLines | ForEach-Object { Write-Host $_ }
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("## update_tests failure`n```n" + ($failLines -join "`n") + "`n```")
           }
           if ($code -ne 0) {
             $detail = ($failLines -join "`n")
             if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join "`n" }
-            if (-not $detail) { $detail = "no Qt Test log produced; loader/DLL failure likely" }
             throw "update_tests failed with exit_code=$code`n$detail"
           }
 
@@ -166,6 +188,7 @@ jobs:
             build-windows/update_tests.log
             build-windows/update_tests.console.txt
             build-windows/update_tests.err.txt
+            build-windows/update_tests.diag.txt
             build-windows/ops_core_tests.log
             build-windows/ops_core_tests.console.txt
             build-windows/ops_core_tests.err.txt
