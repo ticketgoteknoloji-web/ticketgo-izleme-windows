@@ -181,14 +181,6 @@ jobs:
             build-windows/ops_core_tests.err.txt
           if-no-files-found: warn
 
-      - name: Upload smoke logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-logs
-          path: ci-logs/
-          if-no-files-found: warn
-
       - name: Deploy Qt runtime
         shell: pwsh
         run: |
@@ -231,6 +223,14 @@ jobs:
           Write-Host "smoke probe exit_code=$code"
           if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
         # GUI screens and live login are not available on hosted runners.
+
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: ci-logs/
+          if-no-files-found: warn
 
       - name: Build installer
         shell: pwsh
