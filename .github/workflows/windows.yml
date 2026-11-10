@@ -181,6 +181,14 @@ jobs:
             build-windows/ops_core_tests.err.txt
           if-no-files-found: warn
 
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: ci-logs/
+          if-no-files-found: warn
+
       - name: Deploy Qt runtime
         shell: pwsh
         run: |
@@ -191,19 +199,35 @@ jobs:
             Copy-Item build-windows/ticketgo-update-helper.exe $dist
           }
           & "$env:QT_PREFIX/bin/windeployqt.exe" "$dist/TicketGoIzleme.exe" --qmldir qml --release --no-translations
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit_code=$LASTEXITCODE" }
+          # Ensure headless smoke probe plugins exist even if windeployqt skips them.
+          New-Item -ItemType Directory -Force -Path "$dist/platforms","$dist/sqldrivers" | Out-Null
+          Copy-Item "$env:QT_PREFIX/plugins/platforms/qoffscreen.dll" "$dist/platforms/" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:QT_PREFIX/plugins/platforms/qwindows.dll" "$dist/platforms/" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:QT_PREFIX/plugins/sqldrivers/qsqlite.dll" "$dist/sqldrivers/" -Force -ErrorAction SilentlyContinue
           if (Test-Path build-windows/ticketgo-update-helper.exe) {
             Copy-Item build-windows/ticketgo-update-helper.exe "$dist/ticketgo-update-helper.exe" -Force
           }
+          Get-ChildItem $dist -Recurse -Filter *.dll | Select-Object -First 30 FullName
 
       - name: Smoke probe
         shell: pwsh
         run: |
-          # Run the deployed tree so Qt platform/plugin DLLs are present for the linked GUI modules.
-          $exe = ".\build-windows\dist\TicketGoIzleme.exe"
+          $dist = Join-Path $env:GITHUB_WORKSPACE "build-windows\dist"
+          $exe = Join-Path $dist "TicketGoIzleme.exe"
           if (-not (Test-Path $exe)) { throw "deployed TicketGoIzleme.exe missing" }
+          $out = Join-Path $env:GITHUB_WORKSPACE "ci-logs\smoke.out.txt"
+          $err = Join-Path $env:GITHUB_WORKSPACE "ci-logs\smoke.err.txt"
+          New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
+          Remove-Item $out,$err -ErrorAction SilentlyContinue
           $env:QT_QPA_PLATFORM = "offscreen"
-          & $exe --probe-once
-          $code = $LASTEXITCODE
+          $env:QT_PLUGIN_PATH = Join-Path $dist "plugins"
+          if (-not (Test-Path $env:QT_PLUGIN_PATH)) { $env:QT_PLUGIN_PATH = $dist }
+          # WIN32 GUI subsystem: capture exit code via Start-Process, not PowerShell LASTEXITCODE alone.
+          $p = Start-Process -FilePath $exe -ArgumentList @("--probe-once") -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          $code = $p.ExitCode
+          Write-Host "===== smoke stdout ====="; Get-Content $out -ErrorAction SilentlyContinue
+          Write-Host "===== smoke stderr ====="; Get-Content $err -ErrorAction SilentlyContinue
           Write-Host "smoke probe exit_code=$code"
           if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
         # GUI screens and live login are not available on hosted runners.
