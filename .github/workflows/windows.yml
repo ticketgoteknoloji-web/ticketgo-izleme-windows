@@ -181,17 +181,6 @@ jobs:
             build-windows/ops_core_tests.err.txt
           if-no-files-found: warn
 
-      - name: Smoke probe
-        shell: pwsh
-        run: |
-          $exe = ".\build-windows\TicketGoIzleme.exe"
-          if (-not (Test-Path $exe)) { throw "TicketGoIzleme.exe missing" }
-          & $exe --probe-once
-          $code = $LASTEXITCODE
-          Write-Host "smoke probe exit_code=$code"
-          if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
-        # GUI screens and live login are not available on hosted runners.
-
       - name: Deploy Qt runtime
         shell: pwsh
         run: |
@@ -205,6 +194,19 @@ jobs:
           if (Test-Path build-windows/ticketgo-update-helper.exe) {
             Copy-Item build-windows/ticketgo-update-helper.exe "$dist/ticketgo-update-helper.exe" -Force
           }
+
+      - name: Smoke probe
+        shell: pwsh
+        run: |
+          # Run the deployed tree so Qt platform/plugin DLLs are present for the linked GUI modules.
+          $exe = ".\build-windows\dist\TicketGoIzleme.exe"
+          if (-not (Test-Path $exe)) { throw "deployed TicketGoIzleme.exe missing" }
+          $env:QT_QPA_PLATFORM = "offscreen"
+          & $exe --probe-once
+          $code = $LASTEXITCODE
+          Write-Host "smoke probe exit_code=$code"
+          if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
+        # GUI screens and live login are not available on hosted runners.
 
       - name: Build installer
         shell: pwsh
