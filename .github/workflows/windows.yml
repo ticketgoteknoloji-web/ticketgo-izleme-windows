@@ -157,14 +157,16 @@ jobs:
           Write-Host "tg_update_core_tests exit_code=$code"
           $summary = @()
           foreach ($path in @($log,$out,$err,$diag)) { $summary += Get-Content $path -ErrorAction SilentlyContinue }
-          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll|cmd_exit|begin=' }
-          if ($failLines) {
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("## tg_update_core_tests failure`n```n" + ($failLines -join "`n") + "`n```")
+          $failLines = @($summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll|cmd_exit|begin=' })
+          if ($failLines.Count -gt 0) {
+            # Avoid trailing backtick-quote sequences like `n``` which break PowerShell parsing.
+            $block = @('## tg_update_core_tests failure', '```') + $failLines + @('```')
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($block -join [Environment]::NewLine)
           }
           if ($code -ne 0) {
-            $detail = ($failLines -join "`n")
-            if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join "`n" }
-            throw "tg_update_core_tests failed with exit_code=$code`n$detail"
+            $detail = ($failLines -join [Environment]::NewLine)
+            if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join [Environment]::NewLine }
+            throw ("tg_update_core_tests failed with exit_code={0}{1}{2}" -f $code, [Environment]::NewLine, $detail)
           }
 
       - name: Upload update_tests logs
