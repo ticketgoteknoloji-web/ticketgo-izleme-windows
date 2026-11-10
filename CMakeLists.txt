@@ -152,3 +152,7 @@ add_test(NAME ops_core COMMAND ops_core_tests)
 qt_add_executable(update_tests tests/test_update.cpp)
 target_link_libraries(update_tests PRIVATE update_core Qt6::Test Qt6::Network)
 add_test(NAME update_core COMMAND update_tests)
+if(WIN32)
+  # Force console subsystem so CI can capture loader errors and Qt Test -o logs.
+  set_target_properties(ops_core_tests update_tests ticketgo-update-helper PROPERTIES WIN32_EXECUTABLE FALSE)
+endif()

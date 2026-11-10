@@ -82,6 +82,15 @@ jobs:
           "QT_QPA_PLATFORM=offscreen" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Added to PATH: $bin"
 
+      - name: Harden build workspace
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build-windows | Out-Null
+          # Exclusion must exist before compiling test EXEs; otherwise Defender can quarantine update_tests.exe.
+          Add-MpPreference -ExclusionPath "$PWD" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$PWD\build-windows" -ErrorAction SilentlyContinue
+          Write-Host "Defender exclusions requested for $PWD"
+
       - name: Configure CMake
         shell: pwsh
         run: |
@@ -90,49 +99,52 @@ jobs:
       - name: Build
         run: cmake --build build-windows --config Release --target ops_core_tests update_tests ticketgo-izleme ticketgo-update-helper
 
-      - name: Harden test workspace
+      - name: Stage Qt DLLs beside test binaries
         shell: pwsh
         run: |
-          # Avoid Defender quarantining temporary *.exe fixtures written by update_tests.
-          Add-MpPreference -ExclusionPath "$PWD\build-windows" -ErrorAction SilentlyContinue
-          Write-Host "test workspace=$PWD\build-windows"
+          $bin = Join-Path $env:QT_PREFIX "bin"
+          $dest = Join-Path $PWD "build-windows"
+          foreach ($name in @("Qt6Core.dll","Qt6Network.dll","Qt6Test.dll","Qt6Gui.dll")) {
+            $src = Join-Path $bin $name
+            if (Test-Path $src) { Copy-Item $src $dest -Force; Write-Host "staged $name" }
+          }
+          Get-ChildItem $dest -Filter *.exe | ForEach-Object { "{0} {1} bytes" -f $_.Name, $_.Length }
 
       - name: Test ops_core
         shell: pwsh
         run: |
-          $exe = Join-Path $PWD "build-windows\ops_core_tests.exe"
-          if (-not (Test-Path $exe)) { throw "ops_core_tests.exe missing" }
-          # Use cmd.exe so PowerShell cannot split Qt Test's "file,txt" -o argument on commas.
-          cmd.exe /c "`"$exe`" -v2 -o build-windows\ops_core_tests.log,txt > build-windows\ops_core_tests.console.txt 2>&1"
-          $code = $LASTEXITCODE
-          Write-Host "===== ops_core console ====="
-          if (Test-Path build-windows/ops_core_tests.console.txt) { Get-Content build-windows/ops_core_tests.console.txt }
-          Write-Host "===== ops_core log ====="
-          if (Test-Path build-windows/ops_core_tests.log) { Get-Content build-windows/ops_core_tests.log }
+          Set-Location build-windows
+          if (-not (Test-Path .\ops_core_tests.exe)) { throw "ops_core_tests.exe missing" }
+          $p = Start-Process -FilePath .\ops_core_tests.exe -ArgumentList @("-v2","-o","ops_core_tests.log,txt") -Wait -PassThru -NoNewWindow -RedirectStandardOutput ops_core_tests.console.txt -RedirectStandardError ops_core_tests.err.txt
+          $code = $p.ExitCode
+          Write-Host "===== ops_core console ====="; Get-Content .\ops_core_tests.console.txt -ErrorAction SilentlyContinue
+          Write-Host "===== ops_core err ====="; Get-Content .\ops_core_tests.err.txt -ErrorAction SilentlyContinue
+          Write-Host "===== ops_core log ====="; Get-Content .\ops_core_tests.log -ErrorAction SilentlyContinue
           Write-Host "ops_core_tests exit_code=$code"
           if ($code -ne 0) { throw "ops_core_tests failed with exit_code=$code" }
 
       - name: Test update_core
         shell: pwsh
         run: |
-          $exe = Join-Path $PWD "build-windows\update_tests.exe"
-          if (-not (Test-Path $exe)) { throw "update_tests.exe missing" }
+          Set-Location build-windows
+          if (-not (Test-Path .\update_tests.exe)) { throw "update_tests.exe missing" }
           Write-Host "QT_PREFIX=$env:QT_PREFIX"
-          Write-Host "PATH has Qt bin:" ((($env:PATH -split ';') | Where-Object { $_ -match 'Qt' }) -join ' | ')
-          Get-ChildItem (Join-Path $env:QT_PREFIX "bin\Qt6*.dll") -ErrorAction Stop | Select-Object -First 20 | ForEach-Object { $_.Name }
-          # Root cause fix: do NOT use PowerShell '*>' with '&' here.
-          # On windows-latest that combination produced exit_code=1 with zero Qt Test log files.
-          cmd.exe /c "`"$exe`" -v2 -o build-windows\update_tests.log,txt > build-windows\update_tests.console.txt 2>&1"
-          $code = $LASTEXITCODE
-          Write-Host "===== update_tests console ====="
-          if (Test-Path build-windows/update_tests.console.txt) { Get-Content build-windows/update_tests.console.txt }
-          Write-Host "===== update_tests log ====="
-          if (Test-Path build-windows/update_tests.log) { Get-Content build-windows/update_tests.log }
+          Write-Host ("update_tests size={0}" -f (Get-Item .\update_tests.exe).Length)
+          Remove-Item .\update_tests.console.txt,.\update_tests.err.txt,.\update_tests.log -ErrorAction SilentlyContinue
+          # Start-Process avoids PowerShell comma-splitting and keeps stdout/stderr files even on crash.
+          $p = Start-Process -FilePath (Join-Path (Get-Location) "update_tests.exe") -ArgumentList @("-v2","-o","update_tests.log,txt") -WorkingDirectory (Get-Location) -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path (Get-Location) "update_tests.console.txt") -RedirectStandardError (Join-Path (Get-Location) "update_tests.err.txt")
+          $code = if ($null -eq $p) { -999 } else { $p.ExitCode }
+          if (-not (Test-Path .\update_tests.console.txt)) { Set-Content .\update_tests.console.txt "Start-Process produced no console capture" }
+          if (-not (Test-Path .\update_tests.err.txt)) { Set-Content .\update_tests.err.txt "Start-Process produced no stderr capture" }
+          Write-Host "===== update_tests console ====="; Get-Content .\update_tests.console.txt -ErrorAction SilentlyContinue
+          Write-Host "===== update_tests err ====="; Get-Content .\update_tests.err.txt -ErrorAction SilentlyContinue
+          Write-Host "===== update_tests log ====="; Get-Content .\update_tests.log -ErrorAction SilentlyContinue
           Write-Host "update_tests exit_code=$code"
           $summary = @()
-          if (Test-Path build-windows/update_tests.log) { $summary += Get-Content build-windows/update_tests.log }
-          if (Test-Path build-windows/update_tests.console.txt) { $summary += Get-Content build-windows/update_tests.console.txt }
-          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error' }
+          foreach ($f in @(".\update_tests.log",".\update_tests.console.txt",".\update_tests.err.txt")) {
+            if (Test-Path $f) { $summary += Get-Content $f }
+          }
+          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll' }
           if ($failLines) {
             Write-Host "===== failure highlights ====="
             $failLines | ForEach-Object { Write-Host $_ }
@@ -141,7 +153,7 @@ jobs:
           if ($code -ne 0) {
             $detail = ($failLines -join "`n")
             if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join "`n" }
-            if (-not $detail) { $detail = "no Qt Test log produced; see console capture and DLL PATH above" }
+            if (-not $detail) { $detail = "no Qt Test log produced; loader/DLL failure likely" }
             throw "update_tests failed with exit_code=$code`n$detail"
           }
 
@@ -153,8 +165,10 @@ jobs:
           path: |
             build-windows/update_tests.log
             build-windows/update_tests.console.txt
+            build-windows/update_tests.err.txt
             build-windows/ops_core_tests.log
             build-windows/ops_core_tests.console.txt
+            build-windows/ops_core_tests.err.txt
           if-no-files-found: warn
 
       - name: Smoke probe
