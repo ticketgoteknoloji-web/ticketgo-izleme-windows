@@ -1,0 +1,233 @@
+name: Windows desktop
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      QT_VERSION: "6.8.1"
+      QT_ARCH: win64_msvc2022_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: C:/Qt
+          key: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-v2
+
+      - name: Install Qt
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: ${{ env.QT_ARCH }}
+          modules: "qtquick3d qtwebsockets qtshadertools"
+          dir: C:/Qt
+          cache: false
+
+      - name: Resolve Qt prefix
+        shell: pwsh
+        run: |
+          $versionRoot = "C:/Qt/Qt/${{ env.QT_VERSION }}"
+          if (-not (Test-Path $versionRoot)) { throw "Qt version root missing: $versionRoot" }
+          $candidates = @(
+            (Join-Path $versionRoot "msvc2022_64"),
+            (Join-Path $versionRoot "${{ env.QT_ARCH }}"),
+            (Join-Path "C:/Qt" "msvc2022_64")
+          )
+          $kit = $candidates | Where-Object { Test-Path (Join-Path $_ "bin/qmake.exe") } | Select-Object -First 1
+          if (-not $kit) {
+            $kit = Get-ChildItem $versionRoot -Directory | Where-Object { Test-Path (Join-Path $_.FullName "bin/qmake.exe") } | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $kit) { throw "Qt kit with qmake.exe not found under $versionRoot" }
+          "QT_PREFIX=$kit" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "QT_PREFIX=$kit"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Expose Qt runtime for tests
+        shell: pwsh
+        run: |
+          if (-not $env:QT_PREFIX) { throw "QT_PREFIX is empty" }
+          $bin = Join-Path $env:QT_PREFIX "bin"
+          if (-not (Test-Path (Join-Path $bin "Qt6Core.dll"))) { throw "Qt6Core.dll missing under $bin" }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+          "QT_PLUGIN_PATH=$(Join-Path $env:QT_PREFIX 'plugins')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "QT_QPA_PLATFORM=offscreen" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Added to PATH: $bin"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$env:QT_PREFIX"
+
+      - name: Build
+        run: cmake --build build-windows --config Release --target ops_core_tests update_tests ticketgo-izleme ticketgo-update-helper
+
+      - name: Harden test workspace
+        shell: pwsh
+        run: |
+          # Avoid Defender quarantining temporary *.exe fixtures written by update_tests.
+          Add-MpPreference -ExclusionPath "$PWD\build-windows" -ErrorAction SilentlyContinue
+          Write-Host "test workspace=$PWD\build-windows"
+
+      - name: Test ops_core
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "build-windows\ops_core_tests.exe"
+          if (-not (Test-Path $exe)) { throw "ops_core_tests.exe missing" }
+          # Use cmd.exe so PowerShell cannot split Qt Test's "file,txt" -o argument on commas.
+          cmd.exe /c "`"$exe`" -v2 -o build-windows\ops_core_tests.log,txt > build-windows\ops_core_tests.console.txt 2>&1"
+          $code = $LASTEXITCODE
+          Write-Host "===== ops_core console ====="
+          if (Test-Path build-windows/ops_core_tests.console.txt) { Get-Content build-windows/ops_core_tests.console.txt }
+          Write-Host "===== ops_core log ====="
+          if (Test-Path build-windows/ops_core_tests.log) { Get-Content build-windows/ops_core_tests.log }
+          Write-Host "ops_core_tests exit_code=$code"
+          if ($code -ne 0) { throw "ops_core_tests failed with exit_code=$code" }
+
+      - name: Test update_core
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "build-windows\update_tests.exe"
+          if (-not (Test-Path $exe)) { throw "update_tests.exe missing" }
+          Write-Host "QT_PREFIX=$env:QT_PREFIX"
+          Write-Host "PATH has Qt bin:" ((($env:PATH -split ';') | Where-Object { $_ -match 'Qt' }) -join ' | ')
+          Get-ChildItem (Join-Path $env:QT_PREFIX "bin\Qt6*.dll") -ErrorAction Stop | Select-Object -First 20 | ForEach-Object { $_.Name }
+          # Root cause fix: do NOT use PowerShell '*>' with '&' here.
+          # On windows-latest that combination produced exit_code=1 with zero Qt Test log files.
+          cmd.exe /c "`"$exe`" -v2 -o build-windows\update_tests.log,txt > build-windows\update_tests.console.txt 2>&1"
+          $code = $LASTEXITCODE
+          Write-Host "===== update_tests console ====="
+          if (Test-Path build-windows/update_tests.console.txt) { Get-Content build-windows/update_tests.console.txt }
+          Write-Host "===== update_tests log ====="
+          if (Test-Path build-windows/update_tests.log) { Get-Content build-windows/update_tests.log }
+          Write-Host "update_tests exit_code=$code"
+          $summary = @()
+          if (Test-Path build-windows/update_tests.log) { $summary += Get-Content build-windows/update_tests.log }
+          if (Test-Path build-windows/update_tests.console.txt) { $summary += Get-Content build-windows/update_tests.console.txt }
+          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error' }
+          if ($failLines) {
+            Write-Host "===== failure highlights ====="
+            $failLines | ForEach-Object { Write-Host $_ }
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("## update_tests failure`n```n" + ($failLines -join "`n") + "`n```")
+          }
+          if ($code -ne 0) {
+            $detail = ($failLines -join "`n")
+            if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join "`n" }
+            if (-not $detail) { $detail = "no Qt Test log produced; see console capture and DLL PATH above" }
+            throw "update_tests failed with exit_code=$code`n$detail"
+          }
+
+      - name: Upload update_tests logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-tests-logs
+          path: |
+            build-windows/update_tests.log
+            build-windows/update_tests.console.txt
+            build-windows/ops_core_tests.log
+            build-windows/ops_core_tests.console.txt
+          if-no-files-found: warn
+
+      - name: Smoke probe
+        shell: pwsh
+        run: |
+          $exe = ".\build-windows\TicketGoIzleme.exe"
+          if (-not (Test-Path $exe)) { throw "TicketGoIzleme.exe missing" }
+          & $exe --probe-once
+          $code = $LASTEXITCODE
+          Write-Host "smoke probe exit_code=$code"
+          if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
+        # GUI screens and live login are not available on hosted runners.
+
+      - name: Deploy Qt runtime
+        shell: pwsh
+        run: |
+          $dist = "build-windows/dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item build-windows/TicketGoIzleme.exe $dist
+          if (Test-Path build-windows/ticketgo-update-helper.exe) {
+            Copy-Item build-windows/ticketgo-update-helper.exe $dist
+          }
+          & "$env:QT_PREFIX/bin/windeployqt.exe" "$dist/TicketGoIzleme.exe" --qmldir qml --release --no-translations
+          if (Test-Path build-windows/ticketgo-update-helper.exe) {
+            Copy-Item build-windows/ticketgo-update-helper.exe "$dist/ticketgo-update-helper.exe" -Force
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "C:\Program Files\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DBuildDir=$PWD\build-windows\dist" "/DOutputDir=$PWD\build-windows" packaging\windows\TicketGoIzleme.iss
+
+      - name: SHA256 and Windows manifest fragment
+        shell: pwsh
+        run: |
+          $setup = "build-windows/TicketGoIzleme-Windows-x64-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "installer missing" }
+          $hash = (Get-FileHash -Algorithm SHA256 $setup).Hash.ToLowerInvariant()
+          $size = (Get-Item $setup).Length
+          # Asset name must match UpdateManager lookup: TicketGoIzleme-update-manifest.json
+          @"
+          {
+            "channel": "stable",
+            "version": "0.1.3",
+            "assets": [
+              {
+                "name": "TicketGoIzleme-Windows-x64-Setup.exe",
+                "platform": "windows",
+                "arch": "x64",
+                "sha256": "$hash",
+                "size": $size,
+                "bundleId": "tr.ticketgoteknoloji.izleme"
+              }
+            ]
+          }
+          "@ | Set-Content -Path build-windows/TicketGoIzleme-update-manifest.json -Encoding utf8NoBOM
+          "TicketGoIzleme-Windows-x64-Setup.exe  $hash" | Set-Content -Path build-windows/TicketGoIzleme-Windows-x64-Setup.exe.sha256 -Encoding ascii
+          "SETUP_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "SHA256=$hash"
+          Write-Host "NOTE: Installer is UNSIGNED (no Windows code-signing certificate in GitHub Secrets)."
+          Write-Host "Update API target: https://api.github.com/repos/ticketgoteknoloji-web/ticketgo-izleme-windows/releases/latest"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TicketGoIzleme-Windows-x64
+          path: |
+            build-windows/TicketGoIzleme-Windows-x64-Setup.exe
+            build-windows/TicketGoIzleme-Windows-x64-Setup.exe.sha256
+            build-windows/TicketGoIzleme-update-manifest.json
+          if-no-files-found: error
+
+      # Release publishing is intentionally omitted until Windows installer + update flow are verified.
+      # Never attach these assets to the macOS repository Releases.
