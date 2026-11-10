@@ -10,10 +10,14 @@ build-mac-check/
 *.key
 .env
 .env.*
+ci-jobs.json
 jobs-artifacts.json
 winrepo.json
 update-tests-logs/
-update-tests-logs.zip
+update-tests-logs2/
+*.zip
 run-logs.zip
 artifact-hdrs.txt
 nightly-hdrs.txt
+ut3/
+ut4/

@@ -19,13 +19,13 @@ if (-not (Test-Path $Windeploy)) { throw "windeployqt not found at $Windeploy" }
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 cmake -S . -B $BuildDir -G "Ninja" -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$QtPrefix"
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
-cmake --build $BuildDir --config Release --target ops_core_tests update_tests ticketgo-izleme ticketgo-update-helper
+cmake --build $BuildDir --config Release --target ops_core_tests tg_update_core_tests ticketgo-izleme ticketgo-update-helper
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
 & "$BuildDir\ops_core_tests.exe"
 if ($LASTEXITCODE -ne 0) { throw "ops_core_tests failed" }
-& "$BuildDir\update_tests.exe"
-if ($LASTEXITCODE -ne 0) { throw "update_tests failed" }
+& "$BuildDir\tg_update_core_tests.exe"
+if ($LASTEXITCODE -ne 0) { throw "tg_update_core_tests failed" }
 
 $AppExe = Join-Path $BuildDir "TicketGoIzleme.exe"
 if (-not (Test-Path $AppExe)) { throw "TicketGoIzleme.exe missing" }

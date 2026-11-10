@@ -82,67 +82,91 @@ jobs:
           "QT_QPA_PLATFORM=offscreen" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Added to PATH: $bin"
 
+      - name: Harden build workspace
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build-windows | Out-Null
+          # Exclusion must exist before compiling test EXEs; otherwise Defender can quarantine update_tests.exe.
+          Add-MpPreference -ExclusionPath "$PWD" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$PWD\build-windows" -ErrorAction SilentlyContinue
+          Write-Host "Defender exclusions requested for $PWD"
+
       - name: Configure CMake
         shell: pwsh
         run: |
           cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$env:QT_PREFIX"
 
       - name: Build
-        run: cmake --build build-windows --config Release --target ops_core_tests update_tests ticketgo-izleme ticketgo-update-helper
+        run: cmake --build build-windows --config Release --target ops_core_tests tg_update_core_tests ticketgo-izleme ticketgo-update-helper
 
-      - name: Harden test workspace
+      - name: Stage Qt DLLs beside test binaries
         shell: pwsh
         run: |
-          # Avoid Defender quarantining temporary *.exe fixtures written by update_tests.
-          Add-MpPreference -ExclusionPath "$PWD\build-windows" -ErrorAction SilentlyContinue
-          Write-Host "test workspace=$PWD\build-windows"
+          $bin = Join-Path $env:QT_PREFIX "bin"
+          $dest = Join-Path $PWD "build-windows"
+          foreach ($name in @("Qt6Core.dll","Qt6Network.dll","Qt6Test.dll","Qt6Gui.dll")) {
+            $src = Join-Path $bin $name
+            if (Test-Path $src) { Copy-Item $src $dest -Force; Write-Host "staged $name" }
+          }
+          Get-ChildItem $dest -Filter *.exe | ForEach-Object { "{0} {1} bytes" -f $_.Name, $_.Length }
 
       - name: Test ops_core
         shell: pwsh
         run: |
-          $exe = Join-Path $PWD "build-windows\ops_core_tests.exe"
-          if (-not (Test-Path $exe)) { throw "ops_core_tests.exe missing" }
-          # Use cmd.exe so PowerShell cannot split Qt Test's "file,txt" -o argument on commas.
-          cmd.exe /c "`"$exe`" -v2 -o build-windows\ops_core_tests.log,txt > build-windows\ops_core_tests.console.txt 2>&1"
-          $code = $LASTEXITCODE
-          Write-Host "===== ops_core console ====="
-          if (Test-Path build-windows/ops_core_tests.console.txt) { Get-Content build-windows/ops_core_tests.console.txt }
-          Write-Host "===== ops_core log ====="
-          if (Test-Path build-windows/ops_core_tests.log) { Get-Content build-windows/ops_core_tests.log }
+          Set-Location build-windows
+          if (-not (Test-Path .\ops_core_tests.exe)) { throw "ops_core_tests.exe missing" }
+          $p = Start-Process -FilePath .\ops_core_tests.exe -ArgumentList @("-v2","-o","ops_core_tests.log,txt") -Wait -PassThru -NoNewWindow -RedirectStandardOutput ops_core_tests.console.txt -RedirectStandardError ops_core_tests.err.txt
+          $code = $p.ExitCode
+          Write-Host "===== ops_core console ====="; Get-Content .\ops_core_tests.console.txt -ErrorAction SilentlyContinue
+          Write-Host "===== ops_core err ====="; Get-Content .\ops_core_tests.err.txt -ErrorAction SilentlyContinue
+          Write-Host "===== ops_core log ====="; Get-Content .\ops_core_tests.log -ErrorAction SilentlyContinue
           Write-Host "ops_core_tests exit_code=$code"
           if ($code -ne 0) { throw "ops_core_tests failed with exit_code=$code" }
 
       - name: Test update_core
         shell: pwsh
         run: |
-          $exe = Join-Path $PWD "build-windows\update_tests.exe"
-          if (-not (Test-Path $exe)) { throw "update_tests.exe missing" }
-          Write-Host "QT_PREFIX=$env:QT_PREFIX"
-          Write-Host "PATH has Qt bin:" ((($env:PATH -split ';') | Where-Object { $_ -match 'Qt' }) -join ' | ')
-          Get-ChildItem (Join-Path $env:QT_PREFIX "bin\Qt6*.dll") -ErrorAction Stop | Select-Object -First 20 | ForEach-Object { $_.Name }
-          # Root cause fix: do NOT use PowerShell '*>' with '&' here.
-          # On windows-latest that combination produced exit_code=1 with zero Qt Test log files.
-          cmd.exe /c "`"$exe`" -v2 -o build-windows\update_tests.log,txt > build-windows\update_tests.console.txt 2>&1"
+          $ErrorActionPreference = "Continue"
+          $logs = Join-Path $env:GITHUB_WORKSPACE "ci-logs"
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          $dir = Join-Path $env:GITHUB_WORKSPACE "build-windows"
+          $diag = Join-Path $logs "tg_update_core_tests.diag.txt"
+          $exe = Join-Path $dir "tg_update_core_tests.exe"
+          Set-Content -Path $diag -Value "begin=$(Get-Date -Format o)"
+          Add-Content $diag "workspace=$env:GITHUB_WORKSPACE"
+          Add-Content $diag "pwd=$PWD"
+          Add-Content $diag "exe_exists=$(Test-Path $exe)"
+          Get-ChildItem $dir -Filter *.exe | ForEach-Object { Add-Content $diag ("exe=" + $_.Name + " size=" + $_.Length) }
+          if (-not (Test-Path $exe)) { Get-Content $diag; throw "tg_update_core_tests.exe missing" }
+          $item = Get-Item $exe
+          Add-Content $diag "exe_full=$($item.FullName) exe_size=$($item.Length)"
+          $out = Join-Path $logs "tg_update_core_tests.console.txt"
+          $err = Join-Path $logs "tg_update_core_tests.err.txt"
+          $log = Join-Path $logs "tg_update_core_tests.log"
+          Remove-Item $out,$err,$log -ErrorAction SilentlyContinue
+          Push-Location $dir
+          cmd.exe /c "tg_update_core_tests.exe -v2 `"-o`" `"$log,txt`" > `"$out`" 2> `"$err`""
           $code = $LASTEXITCODE
-          Write-Host "===== update_tests console ====="
-          if (Test-Path build-windows/update_tests.console.txt) { Get-Content build-windows/update_tests.console.txt }
-          Write-Host "===== update_tests log ====="
-          if (Test-Path build-windows/update_tests.log) { Get-Content build-windows/update_tests.log }
-          Write-Host "update_tests exit_code=$code"
+          Pop-Location
+          Add-Content $diag "cmd_exit=$code"
+          foreach ($path in @($diag,$out,$err,$log)) {
+            if (-not (Test-Path $path)) { Set-Content $path "missing after launch" }
+            Write-Host "===== $(Split-Path $path -Leaf) ====="
+            Get-Content $path -ErrorAction SilentlyContinue
+          }
+          Write-Host "tg_update_core_tests exit_code=$code"
           $summary = @()
-          if (Test-Path build-windows/update_tests.log) { $summary += Get-Content build-windows/update_tests.log }
-          if (Test-Path build-windows/update_tests.console.txt) { $summary += Get-Content build-windows/update_tests.console.txt }
-          $failLines = $summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error' }
-          if ($failLines) {
-            Write-Host "===== failure highlights ====="
-            $failLines | ForEach-Object { Write-Host $_ }
-            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ("## update_tests failure`n```n" + ($failLines -join "`n") + "`n```")
+          foreach ($path in @($log,$out,$err,$diag)) { $summary += Get-Content $path -ErrorAction SilentlyContinue }
+          $failLines = @($summary | Where-Object { $_ -match 'FAIL!|Totals:|QFATAL|ASSERT|exit_code|Cannot|error|not found|dll|cmd_exit|begin=' })
+          if ($failLines.Count -gt 0) {
+            # Avoid trailing backtick-quote sequences like `n``` which break PowerShell parsing.
+            $block = @('## tg_update_core_tests failure', '```') + $failLines + @('```')
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($block -join [Environment]::NewLine)
           }
           if ($code -ne 0) {
-            $detail = ($failLines -join "`n")
-            if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join "`n" }
-            if (-not $detail) { $detail = "no Qt Test log produced; see console capture and DLL PATH above" }
-            throw "update_tests failed with exit_code=$code`n$detail"
+            $detail = ($failLines -join [Environment]::NewLine)
+            if (-not $detail) { $detail = ($summary | Select-Object -Last 80) -join [Environment]::NewLine }
+            throw ("tg_update_core_tests failed with exit_code={0}{1}{2}" -f $code, [Environment]::NewLine, $detail)
           }
 
       - name: Upload update_tests logs
@@ -151,22 +175,11 @@ jobs:
         with:
           name: update-tests-logs
           path: |
-            build-windows/update_tests.log
-            build-windows/update_tests.console.txt
+            ci-logs/
             build-windows/ops_core_tests.log
             build-windows/ops_core_tests.console.txt
+            build-windows/ops_core_tests.err.txt
           if-no-files-found: warn
-
-      - name: Smoke probe
-        shell: pwsh
-        run: |
-          $exe = ".\build-windows\TicketGoIzleme.exe"
-          if (-not (Test-Path $exe)) { throw "TicketGoIzleme.exe missing" }
-          & $exe --probe-once
-          $code = $LASTEXITCODE
-          Write-Host "smoke probe exit_code=$code"
-          if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
-        # GUI screens and live login are not available on hosted runners.
 
       - name: Deploy Qt runtime
         shell: pwsh
@@ -178,9 +191,46 @@ jobs:
             Copy-Item build-windows/ticketgo-update-helper.exe $dist
           }
           & "$env:QT_PREFIX/bin/windeployqt.exe" "$dist/TicketGoIzleme.exe" --qmldir qml --release --no-translations
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit_code=$LASTEXITCODE" }
+          # Ensure headless smoke probe plugins exist even if windeployqt skips them.
+          New-Item -ItemType Directory -Force -Path "$dist/platforms","$dist/sqldrivers" | Out-Null
+          Copy-Item "$env:QT_PREFIX/plugins/platforms/qoffscreen.dll" "$dist/platforms/" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:QT_PREFIX/plugins/platforms/qwindows.dll" "$dist/platforms/" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$env:QT_PREFIX/plugins/sqldrivers/qsqlite.dll" "$dist/sqldrivers/" -Force -ErrorAction SilentlyContinue
           if (Test-Path build-windows/ticketgo-update-helper.exe) {
             Copy-Item build-windows/ticketgo-update-helper.exe "$dist/ticketgo-update-helper.exe" -Force
           }
+          Get-ChildItem $dist -Recurse -Filter *.dll | Select-Object -First 30 FullName
+
+      - name: Smoke probe
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE "build-windows\dist"
+          $exe = Join-Path $dist "TicketGoIzleme.exe"
+          if (-not (Test-Path $exe)) { throw "deployed TicketGoIzleme.exe missing" }
+          $out = Join-Path $env:GITHUB_WORKSPACE "ci-logs\smoke.out.txt"
+          $err = Join-Path $env:GITHUB_WORKSPACE "ci-logs\smoke.err.txt"
+          New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null
+          Remove-Item $out,$err -ErrorAction SilentlyContinue
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:QT_PLUGIN_PATH = Join-Path $dist "plugins"
+          if (-not (Test-Path $env:QT_PLUGIN_PATH)) { $env:QT_PLUGIN_PATH = $dist }
+          # WIN32 GUI subsystem: capture exit code via Start-Process, not PowerShell LASTEXITCODE alone.
+          $p = Start-Process -FilePath $exe -ArgumentList @("--probe-once") -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          $code = $p.ExitCode
+          Write-Host "===== smoke stdout ====="; Get-Content $out -ErrorAction SilentlyContinue
+          Write-Host "===== smoke stderr ====="; Get-Content $err -ErrorAction SilentlyContinue
+          Write-Host "smoke probe exit_code=$code"
+          if ($code -ne 0) { throw "smoke probe failed with exit_code=$code" }
+        # GUI screens and live login are not available on hosted runners.
+
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs
+          path: ci-logs/
+          if-no-files-found: warn
 
       - name: Build installer
         shell: pwsh
