@@ -197,7 +197,8 @@ private:
             const int split = buffer.indexOf("\r\n\r\n");
             if (split < 0) return;
             const QString head = QString::fromUtf8(buffer.left(split));
-            if (head.contains(QStringLiteral("User-Agent: TicketGoIzleme/"))) sawAgent = true;
+            // Qt may emit user-agent casing differently on Windows; match the product token only.
+            if (head.contains(QStringLiteral("TicketGoIzleme/"), Qt::CaseInsensitive)) sawAgent = true;
             const QString path = head.section(QLatin1Char(' '), 1, 1);
             if (path == stall) return;
             const int code = codes.value(path, 200);
