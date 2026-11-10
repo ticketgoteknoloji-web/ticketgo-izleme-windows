@@ -13,9 +13,9 @@ Bu klasör macOS izleme projesinin Windows kopyasıdır. macOS deposuna push edi
 ```powershell
 $env:QT_PREFIX = "C:\Qt\6.8.1\msvc2022_64"
 cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$env:QT_PREFIX"
-cmake --build build-windows --config Release --target ops_core_tests update_tests ticketgo-izleme ticketgo-update-helper
+cmake --build build-windows --config Release --target ops_core_tests tg_update_core_tests ticketgo-izleme ticketgo-update-helper
 .\build-windows\ops_core_tests.exe
-.\build-windows\update_tests.exe
+.\build-windows\tg_update_core_tests.exe
 .\packaging\windows\build.ps1
 ```
 
